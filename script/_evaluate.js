@@ -117,13 +117,46 @@ const emoDict = {
     '綺麗':       { GFL: 0.1, GBL: 0.1, GFS: -0.1, GBS: -0.1 }
 };
 
+// ==========================================
+// 代表色（類似度計算の対象になる色はこれだけ）
+// ==========================================
+const repColors = {
+    '赤': [0, 100, 50],
+    '青': [240, 100, 50],
+    '緑': [120, 100, 50],
+    '黄': [60, 100, 50],
+    '紫': [300, 100, 50],
+    'ピンク': [330, 100, 80],
+    '白': [0, 0, 100],
+    '黒': [0, 0, 0],
+    'グレー': [0, 0, 50],
+    '茶色': [30, 100, 30],
+    'オレンジ': [30, 100, 50],
+    '水色': [180, 100, 50]
+};
+
+const repColorConditions = {};
+for (const [name, hsl] of Object.entries(repColors)) {
+    let h = hueToDictScale(hsl[0]);
+    let s = hsl[1] / 50 - 1;
+    let l = hsl[2] / 50 - 1;
+    repColorConditions[name] = {
+        GBH: h, GFH: h, GRH: h, GSH: h,
+        GBS: s, GFS: s, GRS: s, GSS: s,
+        GBL: l, GFL: l, GRL: l, GSL: l
+    };
+}
+
 function hueToDictScale(hueDeg) {
     return (hueDeg + 180) / 180 % 2 - 1;
 }
 
-// ★ 追加：英語を完全に排除し、カタカナでプレースホルダーを生成するための配列
+// 英語を完全に排除し、カタカナでプレースホルダーを生成するための配列
 const KANA_MAP = "アイウエオカキクケコサシスセソタチツテトナニヌネノハヒフヘホマミムメモヤユヨラリルレロワヲン";
 
+// ==========================================
+// 完全一致キーワード（dics.color は「一致判定」専用）
+// ==========================================
 let EXACT_KEYWORDS = null;
 function getExactKeywords() {
     if (EXACT_KEYWORDS) return EXACT_KEYWORDS;
@@ -137,10 +170,47 @@ function getExactKeywords() {
             kws.push(...c.name);
         });
     }
-    
+
     kws.sort((a, b) => b.length - a.length);
     EXACT_KEYWORDS = [...new Set(kws)];
     return EXACT_KEYWORDS;
+}
+
+// ==========================================
+// 類似度計算（対象は 条件キー + 代表色 のみ。dics.color は入れない）
+// ==========================================
+let SIM_TARGET_KEYS = null;
+export function getSimilarityTargetKeys() {
+    if (SIM_TARGET_KEYS) return SIM_TARGET_KEYS;
+    const keys = (dics.conditionKeys || []).filter(key => {
+        const cond = dics.condition[key];
+        if (!cond) return false;
+        const ks = Object.keys(cond);
+        return !(ks.length === 1 && ks[0] === 'FGD');
+    });
+    keys.push(...Object.keys(repColorConditions)); // 代表色のみ
+    SIM_TARGET_KEYS = [...new Set(keys)];
+    return SIM_TARGET_KEYS;
+}
+
+const simCache = new Map();
+function withTimeout(promise, ms) {
+    return Promise.race([
+        promise,
+        new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), ms))
+    ]);
+}
+async function safeSimilar(phrase) {
+    if (simCache.has(phrase)) return simCache.get(phrase);
+    let result = [];
+    try {
+        result = await withTimeout(
+            getSimilarWords(phrase, getSimilarityTargetKeys(), 5, 0.5), 3000);
+    } catch (e) {
+        console.warn(`[similarity] "${phrase}" スキップ:`, e.message);
+    }
+    simCache.set(phrase, result);
+    return result;
 }
 
 function protectExactMatches(text, keywords) {
@@ -148,10 +218,9 @@ function protectExactMatches(text, keywords) {
     let protectedWords = [];
     for (let kw of keywords) {
         if (kw.length >= 2 && tempText.includes(kw)) {
-            // ★ 修正：KWPROTECTではなく、カタカナの「ホゴワードア」などに置き換え
             let placeholder = "ホゴワード" + KANA_MAP[protectedWords.length % KANA_MAP.length];
             protectedWords.push({ placeholder, keyword: kw });
-            // ★ 修正：確実に単語境界を作るため、前後に「読点（、）」を挟む
+            // 確実に単語境界を作るため、前後に「読点（、）」を挟む
             tempText = tempText.split(kw).join(`、${placeholder}、`);
         }
     }
@@ -164,7 +233,7 @@ function restoreProtectedTokens(tokens, protectedWords) {
             if (t.surface_form.includes(pm.placeholder)) {
                 t.surface_form = t.surface_form.split(pm.placeholder).join(pm.keyword);
                 t.basic_form = pm.keyword;
-                t.pos = '名詞'; 
+                t.pos = '名詞';
             }
         });
     });
@@ -173,10 +242,10 @@ function restoreProtectedTokens(tokens, protectedWords) {
 
 export async function analyzeInitialText(tokenizer, originalText) {
     let result = {
-        colors: [],     
-        figures: [],    
-        patterns: [],   
-        conditions: {}  
+        colors: [],
+        figures: [],
+        patterns: [],
+        conditions: {}
     };
 
     if (!originalText || !originalText.trim()) {
@@ -233,7 +302,7 @@ export async function analyzeInitialText(tokenizer, originalText) {
             if (skipBasicFormsInit.has(tokens[j].surface_form)) continue;
 
             const searchWord = (tokens[j].basic_form === '*') ? tokens[j].surface_form : tokens[j].basic_form;
-            const match = await matchDatabase(searchWord, true); 
+            const match = await matchDatabase(searchWord, true);
 
             if (match.colorLocked && match.detectedHue !== null) {
                 const h = match.detectedHue;
@@ -262,7 +331,7 @@ export async function analyzeInitialText(tokenizer, originalText) {
                     }
                 });
             }
-            
+
             if (match.isSimilarity && !match.colorLocked && match.condition && Object.keys(match.condition).length > 0) {
                 const condHue = match.condition['GBH'];
                 if (condHue !== undefined) {
@@ -305,18 +374,18 @@ export async function makeEvaluateRule(tokenizer, originalText, population, curr
     let textArray = modifiedText.split(/[．。()（）\n]\s*/);
     if(DEBUG_MER_2) console.log(`変換・分割後：\n%c${textArray}`, "color: #0ff");
 
-    let detectedColors = [];   
-    let detectedFigures = [];  
-    let detectedPatterns = []; 
+    let detectedColors = [];
+    let detectedFigures = [];
+    let detectedPatterns = [];
     let isRelativeDelta = false;
     let deltaValue = 0;
-    let deltaThickness = 0; 
+    let deltaThickness = 0;
     let detectedNeon = null;
 
     for(let i = 0; i < textArray.length; i++) {
         const singleText = textArray[i];
         if(singleText) {
-            
+
             const { tempText, protectedWords } = protectExactMatches(singleText, getExactKeywords());
             const rawTokens = tokenizer.tokenize(tempText);
             const tokens = restoreProtectedTokens(rawTokens, protectedWords);
@@ -346,15 +415,15 @@ export async function makeEvaluateRule(tokenizer, originalText, population, curr
                     tokens.splice(j, 2, compoundTokens(token, nextToken, '名詞', '複合'));
                     j--; continue;
                 }
+                // ★ 修正1：接頭詞の無限ループ対策
+                // 該当する pos_detail_1 のときだけ結合し、それ以外は何もせず次のルールへ進む
                 if(token.pos == '接頭詞') {
-                    if(token.pos_detail_1 == '名詞接続') {
-                        tokens.splice(j, 2, compoundTokens(token, nextToken, '名詞', '接頭詞付き'));
-                    } else if(token.pos_detail_1 == '動詞接続') {
-                        tokens.splice(j, 2, compoundTokens(token, nextToken, '動詞', '接頭詞付き'));
-                    } else if(token.pos_detail_1 == '形容詞接続') {
-                        tokens.splice(j, 2, compoundTokens(token, nextToken, '形容詞', '接頭詞付き'));
+                    const prefixPosMap = { '名詞接続': '名詞', '動詞接続': '動詞', '形容詞接続': '形容詞' };
+                    const newPos = prefixPosMap[token.pos_detail_1];
+                    if (newPos) {
+                        tokens.splice(j, 2, compoundTokens(token, nextToken, newPos, '接頭詞付き'));
+                        j--; continue;
                     }
-                    j--; continue;
                 }
                 if(
                     ((nextToken.pos == '形容詞') && (nextToken.pos_detail_1 == '接尾')) ||
@@ -380,7 +449,7 @@ export async function makeEvaluateRule(tokenizer, originalText, population, curr
             for(let j = 1; j < tokens.length; j++){
                 const current = tokens[j];
                 if(
-                    current.negative || 
+                    current.negative ||
                     current.surface_form.match(/ない|なく|ません|ぬ|ん|しないで/)
                 ){
                     tokens[j - 1].negative = true;
@@ -389,11 +458,11 @@ export async function makeEvaluateRule(tokenizer, originalText, population, curr
 
             const skipPos = new Set(['助詞', '助動詞', '記号']);
             const skipBasicForms = new Set([
-                '画像', '画像を', '生成', '作成', '作っ', '作って', '描い', '描いて', 'デザイン', '絵', '表示', 
-                'くして','くし','く','いい','感じ','もの','こと','やつ','する', 'して', 'した', 'る', 'なる', 
-                'なっ', 'ある', 'いる', 'もらう', 'くれる', 'あげる', 'ほしい', 'たい', 'くださる', 'もらえる', 
-                'どちら', 'どちらも', 'どっち', 'どれ', 'これ', 'それ', 'あれ', 'ここ', 'そこ', 'あそこ', 
-                'っぽい', 'みたい', 'みたいだ', 'ようだ', 'ような', 'そう', '使う', '使って', '使った', 
+                '画像', '画像を', '生成', '作成', '作っ', '作って', '描い', '描いて', 'デザイン', '絵', '表示',
+                'くして','くし','く','いい','感じ','もの','こと','やつ','する', 'して', 'した', 'る', 'なる',
+                'なっ', 'ある', 'いる', 'もらう', 'くれる', 'あげる', 'ほしい', 'たい', 'くださる', 'もらえる',
+                'どちら', 'どちらも', 'どっち', 'どれ', 'これ', 'それ', 'あれ', 'ここ', 'そこ', 'あそこ',
+                'っぽい', 'みたい', 'みたいだ', 'ようだ', 'ような', 'そう', '使う', '使って', '使った',
                 'つかう', 'つかって','前','後ろ','的',
                 '反転', '反対', '補色', '逆', '入れ替え', '交換', '入れ替えて'
             ]);
@@ -408,25 +477,25 @@ export async function makeEvaluateRule(tokenizer, originalText, population, curr
                     tokens[j].matchDatabase = emptyMatch;
                 } else {
                     let searchWord = (tokens[j].basic_form === '*') ? tokens[j].surface_form : tokens[j].basic_form;
-                    let allowParentSimilarity = tokens[j].children ? false : true; 
+                    let allowParentSimilarity = tokens[j].children ? false : true;
                     let combinedMatch = await matchDatabase(searchWord, allowParentSimilarity);
 
                     if (tokens[j].children) {
                         for (let k = 0; k < tokens[j].children.length; k++) {
                             const childToken = tokens[j].children[k];
                             if (skipPos.has(childToken.pos) || skipBasicForms.has(childToken.basic_form)) {
-                                continue; 
+                                continue;
                             }
                             let childWord = (childToken.basic_form === '*') ? childToken.surface_form : childToken.basic_form;
-                            let childMatch = await matchDatabase(childWord); 
-                            
+                            let childMatch = await matchDatabase(childWord);
+
                             if (childMatch.found) {
                                 combinedMatch.found = true;
-                                childMatch.topic.forEach(t => { 
-                                    if(!combinedMatch.topic.includes(t)) combinedMatch.topic.push(t); 
+                                childMatch.topic.forEach(t => {
+                                    if(!combinedMatch.topic.includes(t)) combinedMatch.topic.push(t);
                                 });
                                 Object.assign(combinedMatch.condition, childMatch.condition);
-                                
+
                                 if (childMatch.colorLocked) combinedMatch.colorLocked = true;
                                 if (childMatch.detectedHue !== null) combinedMatch.detectedHue = childMatch.detectedHue;
                                 if (childMatch.detectedSaturation !== null) combinedMatch.detectedSaturation = childMatch.detectedSaturation;
@@ -439,7 +508,7 @@ export async function makeEvaluateRule(tokenizer, originalText, population, curr
                             }
                         }
                     }
-                    
+
                     tokens[j].matchDatabase = combinedMatch;
 
                     if (tokens[j].matchDatabase.colorLocked) {
@@ -455,7 +524,7 @@ export async function makeEvaluateRule(tokenizer, originalText, population, curr
                                         isNegated = true;
                                         break;
                                     }
-                                    if (tokens[j+k].pos === '名詞') break; 
+                                    if (tokens[j+k].pos === '名詞') break;
                                 }
                             }
                         }
@@ -481,7 +550,7 @@ export async function makeEvaluateRule(tokenizer, originalText, population, curr
                                         isFigNegated = true;
                                         break;
                                     }
-                                    if (tokens[j+k].pos === '名詞') break; 
+                                    if (tokens[j+k].pos === '名詞') break;
                                 }
                             }
                         }
@@ -500,7 +569,7 @@ export async function makeEvaluateRule(tokenizer, originalText, population, curr
                                         isPatNegated = true;
                                         break;
                                     }
-                                    if (tokens[j+k].pos === '名詞') break; 
+                                    if (tokens[j+k].pos === '名詞') break;
                                 }
                             }
                         }
@@ -508,7 +577,7 @@ export async function makeEvaluateRule(tokenizer, originalText, population, curr
                             detectedPatterns.push({ type: pat, negative: isPatNegated });
                         }
                     }
-                    
+
                     if (tokens[j].matchDatabase.isDelta) {
                         isRelativeDelta = true;
                         const cond = tokens[j].matchDatabase.condition;
@@ -523,7 +592,7 @@ export async function makeEvaluateRule(tokenizer, originalText, population, curr
                     }
 
                     if (tokens[j].matchDatabase.isNeon) {
-                        detectedNeon = !tokens[j].negative; 
+                        detectedNeon = !tokens[j].negative;
                     }
                 }
                 severity *= tokens[j].matchDatabase.adjustSeverity;
@@ -531,21 +600,21 @@ export async function makeEvaluateRule(tokenizer, originalText, population, curr
 
             let topicKeys = [['IL','IR','GBH','GBS','GBL','GGT','GGC','GWL','GWA','GWS','GFT','GCX','GCY','GFR','GFZ','GFY','GFX','GFH','GFS','GFL','GFA','GSH','GSS','GSL','GSA','GSW','GRD','GRC','GRR','GRZ','GRH','GRS','GRL','ICA','ICE','IAL','IAB','IBT','IWM','ISH','ISM']];
             let condition = new Object();
-            
+
             tokens.forEach(phrase => {
                 if(phrase.matchDatabase.topic.length > 0) {
                     topicKeys.push(phrase.matchDatabase.topic);
                 }
                 let conditionKeyOfSingleToken = Object.entries(phrase.matchDatabase.condition);
                 let coefficient = 1;
-            
+
                 if (phrase.negative || phrase.over) {
                     coefficient = -1;
                 }
                 conditionKeyOfSingleToken.forEach(pair => {
                     let key = pair[0];
                     let value = pair[1] * coefficient;
-                    
+
                     if(!condition[key]) {
                         condition[key] = { grade: [], deltaGrade: [], stat: [] };
                     }
@@ -556,7 +625,7 @@ export async function makeEvaluateRule(tokenizer, originalText, population, curr
                         condition[key].grade.push(value);
                     }
                 });
-                
+
                 if (phrase.over) {
                     if (!condition["FGD"]) {
                         condition["FGD"] = { grade: [], deltaGrade: [], stat: [] };
@@ -620,7 +689,7 @@ export async function makeEvaluateRule(tokenizer, originalText, population, curr
             conditionEntries.forEach(entry => {
                 const keyName = entry[0];
                 const values = entry[1];
-                
+
                 const grade = values.grade || [];
                 const deltaGrade = values.deltaGrade || [];
                 const stat = values.stat || [];
@@ -684,7 +753,7 @@ export async function makeEvaluateRule(tokenizer, originalText, population, curr
         if (originalText.match(/右/)) {
             targetId = population.pickupChromId;
         }
-        
+
         const targetChrom = population.chroms[targetId];
         const bgH = Number(targetChrom.bgColor_hue);
         const bgS = Number(targetChrom.bgColor_saturation);
@@ -692,7 +761,7 @@ export async function makeEvaluateRule(tokenizer, originalText, population, curr
         const fgH = Number(targetChrom.fg_fill_hue);
         const fgS = Number(targetChrom.fg_fill_saturation);
         const fgL = Number(targetChrom.fg_fill_lightness);
-        
+
         const shapeKeys = [
             'fg_type', 'fg_type2', 'fg_pattern',
             'fg_size_x0', 'fg_size_x1', 'fg_size_x2',
@@ -726,21 +795,21 @@ export async function makeEvaluateRule(tokenizer, originalText, population, curr
             chrom.fg_repeat_changeA_hue        = 0;
             chrom.fg_repeat_changeA_saturation = 0;
             chrom.fg_repeat_changeA_lightness  = 0;
-            
+
             // 図形色・柄の色を確実に反映
             chrom._absolute_colorB = `hsla(${bgH}, ${bgS}%, ${bgL}%, 1)`;
 
             shapeKeys.forEach(key => chrom[key] = lockedShapeData[key]);
         });
-        
+
         evaluateRules.forEach(r => r.colorLocked = false);
-        evaluateRules.push({ 
-            weight: 1, severity: 2.0, 
-            target: { 
+        evaluateRules.push({
+            weight: 1, severity: 2.0,
+            target: {
                 'GBH': [hueToDictScale(fgH)], 'GBS': [fgS / 50 - 1], 'GBL': [fgL / 50 - 1],
                 'GFH': [hueToDictScale(bgH)], 'GFS': [bgS / 50 - 1], 'GFL': [bgL / 50 - 1]
-            }, 
-            colorLocked: true 
+            },
+            colorLocked: true
         });
         evaluateRules.push({ weight: 0, severity: 0, target: {}, lockedFigure: lockedShapeData.fg_type, lockedPattern: lockedShapeData.fg_pattern });
     }
@@ -757,7 +826,7 @@ export async function makeEvaluateRule(tokenizer, originalText, population, curr
         const currentBgL = Number(targetChrom.bgColor_lightness);
         const currentFgS = Number(targetChrom.fg_fill_saturation);
         const currentFgL = Number(targetChrom.fg_fill_lightness);
-        
+
         const shapeKeys = [
             'fg_type', 'fg_type2', 'fg_pattern',
             'fg_size_x0', 'fg_size_x1', 'fg_size_x2',
@@ -783,34 +852,34 @@ export async function makeEvaluateRule(tokenizer, originalText, population, curr
         population.chroms.forEach(chrom => {
             chrom.bgColor_hue                  = invertedBgH;
             chrom.bgGradient_color_hue         = invertedBgH;
-            chrom.bgColor_saturation           = currentBgS; 
+            chrom.bgColor_saturation           = currentBgS;
             chrom.bgGradient_color_saturation  = currentBgS;
-            chrom.bgColor_lightness            = invertedBgL; 
-            chrom.bgGradient_color_lightness   = invertedBgL; 
+            chrom.bgColor_lightness            = invertedBgL;
+            chrom.bgGradient_color_lightness   = invertedBgL;
 
             chrom.fg_fill_hue                  = invertedFgH;
             chrom.fg_fill_saturation           = currentFgS;
-            chrom.fg_fill_lightness            = invertedFgL; 
+            chrom.fg_fill_lightness            = invertedFgL;
             chrom.fg_stroke_color_hue          = 0;
 
             chrom.fg_repeat_changeA_hue        = 0;
             chrom.fg_repeat_changeA_saturation = 0;
             chrom.fg_repeat_changeA_lightness  = 0;
-            
+
             // 図形色・柄の色を確実に反映
-            chrom._absolute_colorB = `hsla(${invertedFgH}, ${currentFgS}%, ${invertedFgL}%, 1)`; 
-            
+            chrom._absolute_colorB = `hsla(${invertedFgH}, ${currentFgS}%, ${invertedFgL}%, 1)`;
+
             shapeKeys.forEach(key => chrom[key] = lockedShapeData[key]);
         });
 
         evaluateRules.forEach(r => r.colorLocked = false);
-        evaluateRules.push({ 
-            weight: 1, severity: 2.0, 
-            target: { 
-                'GBH': [hueToDictScale(invertedBgH)], 'GBS': [currentBgS / 50 - 1], 'GBL': [invertedBgL / 50 - 1], 
-                'GFH': [hueToDictScale(invertedFgH)], 'GFS': [currentFgS / 50 - 1], 'GFL': [invertedFgL / 50 - 1]  
-            }, 
-            colorLocked: true 
+        evaluateRules.push({
+            weight: 1, severity: 2.0,
+            target: {
+                'GBH': [hueToDictScale(invertedBgH)], 'GBS': [currentBgS / 50 - 1], 'GBL': [invertedBgL / 50 - 1],
+                'GFH': [hueToDictScale(invertedFgH)], 'GFS': [currentFgS / 50 - 1], 'GFL': [invertedFgL / 50 - 1]
+            },
+            colorLocked: true
         });
         evaluateRules.push({ weight: 0, severity: 0, target: {}, lockedFigure: lockedShapeData.fg_type, lockedPattern: lockedShapeData.fg_pattern });
     }
@@ -829,10 +898,10 @@ export async function makeEvaluateRule(tokenizer, originalText, population, curr
                 if (!onlyFg) {
                     chrom.bgColor_hue                  = h;
                     chrom.bgGradient_color_hue         = h;
-                    chrom.bgColor_saturation           = s * 0.8; 
+                    chrom.bgColor_saturation           = s * 0.8;
                     chrom.bgGradient_color_saturation  = s * 0.8;
                     let bgLightness = l > 50 ? Math.max(0, l - 40) : Math.min(100, l + 40);
-                    if (onlyBg) bgLightness = l; 
+                    if (onlyBg) bgLightness = l;
                     chrom.bgColor_lightness            = bgLightness;
                     chrom.bgGradient_color_lightness   = bgLightness;
                 }
@@ -856,7 +925,7 @@ export async function makeEvaluateRule(tokenizer, originalText, population, curr
                 evaluateRules.forEach(r => r.colorLocked = false);
                 evaluateRules.push(colorRule);
             }
-        } 
+        }
         else if (positiveColors.length === 2) {
             const [colorBg, colorFg] = positiveColors;
             population.chroms.forEach(chrom => {
@@ -867,28 +936,28 @@ export async function makeEvaluateRule(tokenizer, originalText, population, curr
                 chrom.bgColor_lightness            = colorBg.l;
                 chrom.bgGradient_color_lightness   = colorBg.l;
 
-                // ★ 修正：2つ目の色を柄・図形色として確実に上書き適用
+                // 2つ目の色を柄・図形色として確実に上書き適用
                 chrom.fg_fill_hue                  = colorFg.h;
                 chrom.fg_fill_saturation           = colorFg.s;
                 chrom.fg_fill_lightness            = colorFg.l;
                 chrom.fg_stroke_color_hue          = 0;
-                
+
                 chrom.fg_repeat_changeA_hue        = 0;
                 chrom.fg_repeat_changeA_saturation = 0;
                 chrom.fg_repeat_changeA_lightness  = 0;
 
-                // ★ 絶対色指定（チェック柄などに使われる専用変数）にも確実に入れる
-                chrom._absolute_colorB = `hsla(${colorFg.h}, ${colorFg.s}%, ${colorFg.l}%, 1)`; 
+                // 絶対色指定（チェック柄などに使われる専用変数）にも確実に入れる
+                chrom._absolute_colorB = `hsla(${colorFg.h}, ${colorFg.s}%, ${colorFg.l}%, 1)`;
             });
 
             evaluateRules.forEach(r => r.colorLocked = false);
-            evaluateRules.push({ 
-                weight: 1, severity: 2.0, 
-                target: { 
+            evaluateRules.push({
+                weight: 1, severity: 2.0,
+                target: {
                     'GBH': [hueToDictScale(colorBg.h)], 'GBS': [colorBg.s / 50 - 1], 'GBL': [colorBg.l / 50 - 1],
                     'GFH': [hueToDictScale(colorFg.h)], 'GFS': [colorFg.s / 50 - 1], 'GFL': [colorFg.l / 50 - 1]
-                }, 
-                colorLocked: true 
+                },
+                colorLocked: true
             });
 
             if (negativeColors.length > 0) {
@@ -922,13 +991,13 @@ export async function makeEvaluateRule(tokenizer, originalText, population, curr
             });
 
             evaluateRules.forEach(r => r.colorLocked = false);
-            evaluateRules.push({ 
-                weight: 1, severity: 2.0, 
-                target: { 
+            evaluateRules.push({
+                weight: 1, severity: 2.0,
+                target: {
                     'GBH': [hueToDictScale(colorBg.h)], 'GBS': [colorBg.s / 50 - 1], 'GBL': [colorBg.l / 50 - 1],
                     'GFH': [hueToDictScale(colorFg.h)], 'GFS': [colorFg.s / 50 - 1], 'GFL': [colorFg.l / 50 - 1]
-                }, 
-                colorLocked: true 
+                },
+                colorLocked: true
             });
 
             if (negativeColors.length > 0) {
@@ -974,7 +1043,7 @@ export async function makeEvaluateRule(tokenizer, originalText, population, curr
             population.chroms.forEach(chrom => {
                 chrom.fg_type = figA;
                 chrom.fg_type2 = figB;
-                chrom.fg_pattern = 'none'; 
+                chrom.fg_pattern = 'none';
             });
         } else if (positiveFigureTypes.length === 1) {
             const fig = positiveFigureTypes[0];
@@ -999,9 +1068,9 @@ export async function makeEvaluateRule(tokenizer, originalText, population, curr
         const parentShape = population.chroms[population.bestChromId].fg_type;
         population.chroms.forEach(chrom => {
             chrom.fg_type = parentShape;
-            
+
             if (deltaValue !== 0) {
-                const ratio = 1 + deltaValue; 
+                const ratio = 1 + deltaValue;
                 ['fg_size_x0', 'fg_size_x1', 'fg_size_x2', 'fg_size_y0', 'fg_size_y1', 'fg_size_y2'].forEach(key => {
                     let currentVal = Number(chrom[key] || 0);
                     let scale = (currentVal + 1) / 2;
@@ -1036,9 +1105,9 @@ export async function makeEvaluateRule(tokenizer, originalText, population, curr
 
         const parentFigure  = population.chroms[population.bestChromId].fg_type;
         const parentPattern = population.chroms[population.bestChromId].fg_pattern;
-        
+
         population.chroms.forEach(chrom => {
-            chrom.fg_type    = parentFigure; 
+            chrom.fg_type    = parentFigure;
             chrom.fg_pattern = parentPattern;
             ['fg_size_x0', 'fg_size_x1', 'fg_size_x2', 'fg_size_y0', 'fg_size_y1', 'fg_size_y2'].forEach(key => {
                 let currentVal = Number(chrom[key] || 0);
@@ -1048,10 +1117,10 @@ export async function makeEvaluateRule(tokenizer, originalText, population, curr
             });
         });
     }
-    
-    // ★ 追加：評価ルールの中に「色」や「明るさ」の指定があったかチェックし、
+
+    // 評価ルールの中に「色」や「明るさ」の指定があったかチェックし、
     // 指定があれば極端な色（0や100）を許可するフラグを立てる
-    window.allowExtremeColor = evaluateRules.some(r => 
+    window.allowExtremeColor = evaluateRules.some(r =>
         r.colorLocked || (r.target && (r.target['GBL'] || r.target['GFL']))
     );
 }
@@ -1063,7 +1132,7 @@ export function setFitnessScore(chrom) {
         const severity = rule.severity;
         const targets = Object.entries(rule.target);
         let ruleScore = 0;
-        
+
         targets.forEach(target => {
             const topicKey = target[0];
             const targetValues = target[1];
@@ -1092,11 +1161,11 @@ export function setFitnessScore(chrom) {
         fitness += ruleScore;
 
         if (rule.target['GBH'] && rule.target['GBH'].length >= 2) {
-            const requiredColors = rule.target['GBH']; 
+            const requiredColors = rule.target['GBH'];
             const currentBgH = hueToDictScale(Number(chrom.bgColor_hue));
             const currentFgH = hueToDictScale(Number(chrom.fg_fill_hue));
             let coveredColorCount = 0;
-            
+
             requiredColors.forEach(tv => {
                 let matchBg = Math.pow(Math.sin(0.5 * (tv - currentBgH)), 2) < 0.01;
                 let matchFg = Math.pow(Math.sin(0.5 * (tv - currentFgH)), 2) < 0.01;
@@ -1104,7 +1173,7 @@ export function setFitnessScore(chrom) {
             });
 
             if (coveredColorCount < requiredColors.length) {
-                fitness -= 100; 
+                fitness -= 100;
             }
         }
 
@@ -1116,7 +1185,7 @@ export function setFitnessScore(chrom) {
                 let matchBg = Math.pow(Math.sin(0.5 * (tv - currentBgH)), 2) < 0.06;
                 let matchFg = Math.pow(Math.sin(0.5 * (tv - currentFgH)), 2) < 0.06;
                 if (matchBg || matchFg) {
-                    fitness -= 80; 
+                    fitness -= 80;
                 }
             });
         }
@@ -1134,7 +1203,7 @@ export function setFitnessScore(chrom) {
     });
 
     const hasDarkRule = evaluateRules.some(r => {
-        const wantsDarkBg = r.target['GBL'] && r.target['GBL'].some(v => v < -0.4); 
+        const wantsDarkBg = r.target['GBL'] && r.target['GBL'].some(v => v < -0.4);
         const wantsDarkFg = r.target['GFL'] && r.target['GFL'].some(v => v < -0.4);
         return wantsDarkBg || wantsDarkFg;
     });
@@ -1142,9 +1211,9 @@ export function setFitnessScore(chrom) {
     if (!hasDarkRule) {
         const bgLit = Number(chrom.bgColor_lightness);
         const fgLit = Number(chrom.fg_fill_lightness);
-        
+
         if (bgLit < 30 && fgLit < 30) {
-            fitness -= 10; 
+            fitness -= 10;
         } else if (bgLit < 20 || fgLit < 20) {
             fitness -= 5;
         }
@@ -1315,7 +1384,7 @@ async function matchDatabase(phrase, allowSimilarity = true) {
     let detectedFigureType = null;
     let detectedPatternType = null;
     let isDeltaFlag = false;
-    let isSimilarityMatch = false; 
+    let isSimilarityMatch = false;
 
     const shapeKeywords = Object.keys(figureTypeDict).concat(Object.keys(patternTypeDict)).sort((a, b) => b.length - a.length);
     for (const keyword of shapeKeywords) {
@@ -1328,19 +1397,19 @@ async function matchDatabase(phrase, allowSimilarity = true) {
     }
 
     for(let i = 0; i < dics.topicKeys.length; i++) {
-        if(phrase.match(dics.topicKeys[i])) { 
+        if(phrase.match(dics.topicKeys[i])) {
             if(DEBUG_MDB) console.log(dics.topicKeys[i] + 'が言及対象辞書でヒットした: ' + `id: ${i} (${phrase}, ${dics.topic[dics.topicKeys[i]]})`);
-            topicData = dics.topic[dics.topicKeys[i]]; foundFlag = true; break; 
+            topicData = dics.topic[dics.topicKeys[i]]; foundFlag = true; break;
         }
     }
-    
+
     if (topicData.length === 0) {
         for(let len = Math.min(phrase.length - 1, 3); len >= 1; len--) {
             const shortPhrase = phrase.slice(0, len);
             for(let i = 0; i < dics.topicKeys.length; i++) {
-                if(shortPhrase === dics.topicKeys[i]) { 
+                if(shortPhrase === dics.topicKeys[i]) {
                     if(DEBUG_MDB) console.log(dics.topicKeys[i] + 'が言及対象辞書でヒットした（短縮）: ' + `(${phrase}→${shortPhrase})`);
-                    topicData = dics.topic[dics.topicKeys[i]]; foundFlag = true; break; 
+                    topicData = dics.topic[dics.topicKeys[i]]; foundFlag = true; break;
                 }
             }
             if (topicData.length > 0) break;
@@ -1355,20 +1424,21 @@ async function matchDatabase(phrase, allowSimilarity = true) {
     let detectedLightness = null;
 
     let phraseForColor = phrase;
-    for (const keyword of shapeKeywords) { 
-        if (phraseForColor.includes(keyword)) phraseForColor = phraseForColor.replace(keyword, ''); 
+    for (const keyword of shapeKeywords) {
+        if (phraseForColor.includes(keyword)) phraseForColor = phraseForColor.replace(keyword, '');
     }
-    
+
     let phraseForColorClean = phraseForColor.replace(/色$/, '');
-    
+
+    // dics.color は「完全一致する言葉があるか」の判定にのみ使用（類似度の対象には入れない）
     if (dics.color) {
         for(let i = dics.color.length - 1; i >= 0; i--) {
-            const color = dics.color[i]; 
+            const color = dics.color[i];
             let colorMatchFlag = false;
             for(let j = 0; j < color.name.length; j++) {
-                if(phraseForColor && (phraseForColor === color.name[j] || phraseForColorClean === color.name[j] || phraseForColor.match(color.name[j]))) { 
+                if(phraseForColor && (phraseForColor === color.name[j] || phraseForColorClean === color.name[j])) {
                     if(DEBUG_MDB) console.log(color.name[j] + 'が外部色辞書でヒットした: ' + `id: ${i}（元: ${phrase}, 判定: ${phraseForColor}, ${JSON.stringify(color.hsl)}）`);
-                    colorMatchFlag = true; foundFlag = true; colorMatched = true; 
+                    colorMatchFlag = true; foundFlag = true; colorMatched = true;
                     break;
                 }
             }
@@ -1386,132 +1456,110 @@ async function matchDatabase(phrase, allowSimilarity = true) {
     let adjustSeverity = 1;
     let isSeverityWord = false;
     for(let i = 0; i < adjustSeverityTable.length; i++) {
-        if(phrase.match(adjustSeverityTable[i][0])) { 
-            adjustSeverity = adjustSeverityTable[i][1]; 
+        if(phrase.match(adjustSeverityTable[i][0])) {
+            adjustSeverity = adjustSeverityTable[i][1];
             if(DEBUG_MDB) console.log(`重要度補正：${adjustSeverity} （${adjustSeverityTable[i][0]}）`);
-            foundFlag = true; isSeverityWord = true; break; 
+            foundFlag = true; isSeverityWord = true; break;
         }
     }
 
     if (!colorMatched && !isSeverityWord && topicData.length === 0 && detectedFigureType === null && detectedPatternType === null) {
-        
+
         let isDensityMatch = false;
         for (const [keyword, conditions] of Object.entries(densityDict)) {
-            if (phrase === keyword || phrase.includes(keyword)) { 
-                conditionData = Object.assign({}, conditions); topicData = ['GFZ', 'GRC', 'GFX', 'GFY']; 
-                foundFlag = true; isDensityMatch = true; isDeltaFlag = true; 
+            if (phrase === keyword || phrase.includes(keyword)) {
+                conditionData = Object.assign({}, conditions); topicData = ['GFZ', 'GRC', 'GFX', 'GFY'];
+                foundFlag = true; isDensityMatch = true; isDeltaFlag = true;
                 if(DEBUG_MDB) console.log(`[density] "${phrase}" → サイズ・密度指定(相対値):`, conditions);
-                break; 
+                break;
             }
         }
-        
+
         let isThicknessMatch = false;
         if (!isDensityMatch) {
             for (const [keyword, conditions] of Object.entries(thicknessDict)) {
-                if (phrase === keyword || phrase.includes(keyword)) { 
-                    conditionData = Object.assign({}, conditions); topicData = ['GFY', 'GSW']; 
-                    foundFlag = true; isThicknessMatch = true; isDeltaFlag = true; 
+                if (phrase === keyword || phrase.includes(keyword)) {
+                    conditionData = Object.assign({}, conditions); topicData = ['GFY', 'GSW'];
+                    foundFlag = true; isThicknessMatch = true; isDeltaFlag = true;
                     if(DEBUG_MDB) console.log(`[thickness] "${phrase}" → 太さ指定(相対値):`, conditions);
-                    break; 
+                    break;
                 }
             }
         }
-        
+
         let isEmoMatch = false;
         if (!isDensityMatch && !isThicknessMatch) {
             for (const [keyword, conditions] of Object.entries(emoDict)) {
-                if (phrase === keyword || phrase.includes(keyword)) { 
-                    conditionData = Object.assign({}, conditions); topicData = Object.keys(conditions); 
-                    foundFlag = true; isEmoMatch = true; isDeltaFlag = true; 
-                    
+                if (phrase === keyword || phrase.includes(keyword)) {
+                    conditionData = Object.assign({}, conditions); topicData = Object.keys(conditions);
+                    foundFlag = true; isEmoMatch = true; isDeltaFlag = true;
+
                     if (keyword.match(/ゆめかわ|キラキラ|マーブル|幻想的/)) {
-                        if (!detectedPatternType) detectedPatternType = 'kirakira'; 
+                        if (!detectedPatternType) detectedPatternType = 'kirakira';
                     } else if (keyword.match(/かわい|カワイイ|キュート/)) {
                         if (!detectedFigureType) detectedFigureType = 'circle';
                     } else if (keyword.match(/ポップ/)) {
                         if (!detectedFigureType) detectedFigureType = 'circle';
-                        if (!detectedPatternType) detectedPatternType = 'dot'; 
+                        if (!detectedPatternType) detectedPatternType = 'dot';
                     } else if (keyword.match(/かっこ|カッコ|クール/)) {
                         if (!detectedFigureType) detectedFigureType = 'triangle';
                         if (!detectedPatternType) detectedPatternType = 'stripe';
                     }
 
                     if(DEBUG_MDB) console.log(`[emo] "${phrase}" → エモさ指定(相対値):`, conditions);
-                    break; 
+                    break;
                 }
             }
         }
-        
+
         if (!isDensityMatch && !isThicknessMatch && !isEmoMatch) {
             const exactMatch = dics.condition[phrase];
             const shortMatch = !exactMatch && dics.conditionKeys.find(key => phrase.startsWith(key) && key.length >= 2);
-            
-            if (exactMatch) { 
-                conditionData = Object.assign({}, dics.condition[phrase]); foundFlag = true; 
+
+            if (exactMatch) {
+                conditionData = Object.assign({}, dics.condition[phrase]); foundFlag = true;
                 if(DEBUG_MDB) console.log(`[matchDB] "${phrase}" が完全一致`);
-            } 
-            else if (shortMatch) { 
-                conditionData = Object.assign({}, dics.condition[shortMatch]); foundFlag = true; 
+            }
+            else if (shortMatch) {
+                conditionData = Object.assign({}, dics.condition[shortMatch]); foundFlag = true;
                 if(DEBUG_MDB) console.log(`[matchDB] "${phrase}" → "${shortMatch}" で部分一致`);
-            } 
+            }
             else {
+                // ★ 修正3：類似度計算（対象＝条件キー＋代表色のみ／キャッシュ・タイムアウト付き）
                 if (!isSeverityWord) {
                     if (!allowSimilarity) {
                         if(DEBUG_MDB) console.log(`[similarity] "${phrase}" の類似度計算を抑制しました（フラグOFF）`);
                         return { found: false, topic: [], condition: {}, adjustSeverity: 1, colorLocked: false, detectedHue: null, detectedSaturation: null, detectedLightness: null, detectedFigureType: null, detectedPatternType: null, isDelta: false, isNeon: false, isSimilarity: false };
                     }
-                    
-                    const similarityTargetKeys = dics.conditionKeys.filter(key => { 
-                        const cond = dics.condition[key]; const keys = Object.keys(cond); 
-                        return !(keys.length === 1 && keys[0] === 'FGD'); 
-                    });
-                    if (dics.color) {
-                        dics.color.forEach(c => similarityTargetKeys.push(...c.name));
-                    }
-                    
-                    // ★ 修正：AIが知らないローマ字や単語でエラー落ちしないように「try-catch」で囲む
-                    let similar = [];
-                    try {
-                        similar = await getSimilarWords(phrase, similarityTargetKeys, 5, 0.5);
-                    } catch (e) {
-                        console.warn(`[similarity] "${phrase}" は辞書にないためスキップしました（ローマ字等の可能性）`);
-                    }
+
+                    const similar = await safeSimilar(phrase);
 
                     if (similar && similar.length > 0) {
-                        foundFlag = true; 
-                        isSimilarityMatch = true; 
+                        foundFlag = true;
+                        isSimilarityMatch = true;
                         if(DEBUG_MDB) console.log(`[similarity] "${phrase}" の類似語:`, similar);
-                        
-                        const totalScore = similar.reduce((sum, { score }) => sum + score, 0); 
+
+                        const totalScore = similar.reduce((sum, { score }) => sum + score, 0);
                         let firstColorHit = false;
-                        
+
                         similar.forEach(({ word, score }) => {
-                            let matchedColor = null;
-                            if (dics.color) {
-                                matchedColor = dics.color.find(c => c.name.includes(word));
-                            }
-                            if (matchedColor && !firstColorHit) {
-                                colorMatched = true; colorSeverityBoost = 5; 
-                                detectedHue = matchedColor.hsl[0]; detectedSaturation = matchedColor.hsl[1]; detectedLightness = matchedColor.hsl[2]; 
+                            // 代表色のヒット判定
+                            if (repColors[word] && !firstColorHit) {
+                                colorMatched = true; colorSeverityBoost = 5;
+                                detectedHue = repColors[word][0];
+                                detectedSaturation = repColors[word][1];
+                                detectedLightness = repColors[word][2];
                                 firstColorHit = true;
-                                if(DEBUG_MDB) console.log(`[similarity:Color] "${phrase}" から色類似語 "${word}" を採用しました`);
+                                if(DEBUG_MDB) console.log(`[similarity:Color] "${phrase}" から代表色の類似語 "${word}" を採用しました`);
                             }
-                            const cond = dics.condition[word];
-                            if (cond) { 
-                                Object.entries(cond).forEach(([key, value]) => { 
-                                    if (conditionData[key] === undefined) conditionData[key] = 0; 
-                                    conditionData[key] += value * (score / totalScore); 
-                                }); 
-                            } else if (matchedColor) {
-                                let h = hueToDictScale(matchedColor.hsl[0]), s = matchedColor.hsl[1] / 50 - 1, l = matchedColor.hsl[2] / 50 - 1;
-                                if (conditionData['GBH'] === undefined) {
-                                    ["GBH", "GFH", "GRH", "GSH"].forEach(k => { conditionData[k] = 0; });
-                                    ["GBS", "GFS", "GRS", "GSS"].forEach(k => { conditionData[k] = 0; });
-                                    ["GBL", "GFL", "GRL", "GSL"].forEach(k => { conditionData[k] = 0; });
-                                }
-                                ["GBH", "GFH", "GRH", "GSH"].forEach(k => { conditionData[k] += h * (score / totalScore); });
-                                ["GBS", "GFS", "GRS", "GSS"].forEach(k => { conditionData[k] += s * (score / totalScore); });
-                                ["GBL", "GFL", "GRL", "GSL"].forEach(k => { conditionData[k] += l * (score / totalScore); });
+
+                            // 代表色のコンディションと通常のコンディションの両方を処理
+                            const cond = repColorConditions[word] || dics.condition[word];
+                            if (cond) {
+                                Object.entries(cond).forEach(([key, value]) => {
+                                    if (conditionData[key] === undefined) conditionData[key] = 0;
+                                    conditionData[key] += value * (score / totalScore);
+                                });
                             }
                         });
                     }
@@ -1525,19 +1573,19 @@ async function matchDatabase(phrase, allowSimilarity = true) {
         isNeonFlag = true;
     }
 
-    return { 
-        found: foundFlag, 
-        topic: topicData, 
-        condition: conditionData, 
-        adjustSeverity: adjustSeverity * colorSeverityBoost, 
-        colorLocked: colorMatched, 
-        detectedHue: detectedHue, 
-        detectedSaturation: detectedSaturation, 
-        detectedLightness: detectedLightness, 
-        detectedFigureType: detectedFigureType, 
-        detectedPatternType: detectedPatternType, 
-        isDelta: isDeltaFlag, 
+    return {
+        found: foundFlag,
+        topic: topicData,
+        condition: conditionData,
+        adjustSeverity: adjustSeverity * colorSeverityBoost,
+        colorLocked: colorMatched,
+        detectedHue: detectedHue,
+        detectedSaturation: detectedSaturation,
+        detectedLightness: detectedLightness,
+        detectedFigureType: detectedFigureType,
+        detectedPatternType: detectedPatternType,
+        isDelta: isDeltaFlag,
         isNeon: isNeonFlag,
-        isSimilarity: isSimilarityMatch 
+        isSimilarity: isSimilarityMatch
     };
 }
